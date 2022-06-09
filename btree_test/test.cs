@@ -533,7 +533,10 @@ namespace btree_test
             }
             for (int i = start; i < cloneTestSize; i++)
             {
-                _ = b.ReplaceOrInsert(p[i]);
+                lock (mutex)
+                {
+                    _ = b.ReplaceOrInsert(p[i]);
+                }
 
                 if (i % (cloneTestSize / 5) == 0)
                 {

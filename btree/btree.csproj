@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFramework>net6.0</TargetFramework>
     <PackageId>CodeExMachina.BTree</PackageId>
     <Authors>Code Ex Machina, LLC</Authors>
     <Copyright>Copyright © Code Ex Machina, LLC</Copyright>
@@ -11,7 +11,7 @@
     <Description>This package provides an in-memory B-Tree implementation for C#, useful as an ordered, mutable data structure.</Description>
     <RootNamespace>CodeExMachina</RootNamespace>
     <PackOnBuild>true</PackOnBuild>
-    <PackageVersion>0.2.0</PackageVersion>
+    <PackageVersion>0.3.0</PackageVersion>
     <PackageReleaseNotes>Updated BTree class to a generic class.</PackageReleaseNotes>
     <PackageTags>BTree</PackageTags>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>

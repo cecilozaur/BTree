@@ -16,9 +16,10 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace CodeExMachina
-{    
+{
     /// <summary>
     /// FreeList represents a free list of btree nodes. By default each
     /// BTree has its own FreeList, but multiple BTrees can share the same
@@ -40,7 +41,8 @@ namespace CodeExMachina
         /// <param name="comparer"></param>
         public FreeList(Comparer<T> comparer)
             : this(DefaultFreeListSize, comparer)
-        { }
+        {
+        }
 
         /// <summary>
         /// Creates a new free list.
@@ -226,11 +228,19 @@ namespace CodeExMachina
             _children.Insert(index, item);
         }
 
+        public Node<T> SetAt(int i, Node<T> node)
+        {
+            var old = _children[i];
+            _children[i] = node;
+
+            return old;
+        }
+
         // Removes a value at a given index, pulling all subsequent values
         // back.        
         public Node<T> RemoveAt(int index)
         {
-            Node<T> n = _children[index];
+            var n = _children[index];
             _children.RemoveAt(index);
             return n;
         }
@@ -261,6 +271,7 @@ namespace CodeExMachina
             get => _children[i];
             set => _children[i] = value;
         }
+
         public void Append(Node<T> node)
         {
             _children.Add(node);
@@ -352,8 +363,8 @@ namespace CodeExMachina
         // containing all items/children after it.        
         public (T item, Node<T> node) Split(int i)
         {
-            T item = Items[i];
-            Node<T> next = Cow.NewNode();
+            var item = Items[i];
+            var next = Cow.NewNode();
             next.Items.Append(Items.GetRange(i + 1, Items.Length - (i + 1)));
             Items.Truncate(i);
             if (Children.Length > 0)
@@ -361,44 +372,67 @@ namespace CodeExMachina
                 next.Children.Append(Children.GetRange(i + 1, Children.Length - (i + 1)));
                 Children.Truncate(i + 1);
             }
+
             return (item, next);
         }
 
         // Checks if a child should be split, and if so splits it.
         // Returns whether or not a split occurred.        
-        public bool MaybeSplitChild(int i, int maxItems)
+        public (bool, Node<T>) MaybeSplitChild(int i, int maxItems)
         {
             if (Children[i].Items.Length < maxItems)
             {
-                return false;
+                return (false, this);
             }
-            Node<T> first = MutableChild(i);
-            (T item, Node<T> second) = first.Split(maxItems / 2);
-            Items.InsertAt(i, item);
-            Children.InsertAt(i + 1, second);
-            return true;
+
+            var myself = MutableFor(Cow);
+            var first = myself.Children[i].MutableFor(myself.Cow);
+            var (item, second) = first.Split(maxItems / 2);
+
+            myself.SwapChild(i, first);
+            myself.Items.InsertAt(i, item);
+            myself.Children.InsertAt(i + 1, second);
+
+            return (true, myself);
+        }
+
+        private void SwapChild(int i, Node<T> node)
+        {
+            var old = Children.SetAt(i, node);
+            if (old == node)
+            {
+                return;
+            }
+
+            Cow.FreeNode(old);
         }
 
         // Inserts an item into the subtree rooted at this node, making sure
         // no nodes in the subtree exceed maxItems items.  Should an equivalent item be
         // be found/replaced by insert, it will be returned.        
-        public T Insert(T item, int maxItems)
+        public (T, Node<T>) Insert(T item, int maxItems)
         {
             (int i, bool found) = Items.Find(item);
             if (found)
             {
                 T n = Items[i];
                 Items[i] = item;
-                return n;
+                return (n, this);
+
             }
             if (Children.Length == 0)
             {
-                Items.InsertAt(i, item);
-                return null;
+                var myself = MutableFor(Cow);
+                myself.Items.InsertAt(i, item);
+                return (null, myself);
             }
-            if (MaybeSplitChild(i, maxItems))
+
+            var (split, me) = MaybeSplitChild(i, maxItems);
+
+            var root = this;
+            if (split)
             {
-                T inTree = Items[i];
+                var inTree = me.Items[i];
                 if (Less(item, inTree))
                 {
                     // no change, we want first split node
@@ -409,12 +443,25 @@ namespace CodeExMachina
                 }
                 else
                 {
-                    T n = Items[i];
-                    Items[i] = item;
-                    return n;
+                    var o = me.Items[i];
+                    me.Items[i] = item;
+
+                    return (o, me);
                 }
+
+                root = me;
             }
-            return MutableChild(i).Insert(item, maxItems);
+
+            var (ou, child) = root.Children[i].Insert(item, maxItems);
+            if (child == root.Children[i])
+            {
+                return (ou, root);
+            }
+
+            var mee = root.MutableFor(Cow);
+            mee.SwapChild(i, child);
+
+            return (ou, mee);
         }
 
         // Finds the given key in the subtree and returns it.        
@@ -429,6 +476,7 @@ namespace CodeExMachina
             {
                 return Children[i].Get(key);
             }
+
             return null;
         }
 
@@ -439,10 +487,12 @@ namespace CodeExMachina
             {
                 return null;
             }
+
             while (n.Children.Length > 0)
             {
                 n = n.Children[0];
             }
+
             return n.Items.Length == 0 ? null : n.Items[0];
         }
 
@@ -453,73 +503,106 @@ namespace CodeExMachina
             {
                 return null;
             }
+
             while (n.Children.Length > 0)
             {
                 n = n.Children[n.Children.Length - 1];
             }
+
             return n.Items.Length == 0 ? null : n.Items[n.Items.Length - 1];
         }
 
         // Removes an item from the subtree rooted at this node.        
-        public T Remove(T item, int minItems, ToRemove typ)
+        public (T, Node<T>) Remove(T item, int minItems, ToRemove typ)
         {
             int i = 0;
             bool found = false;
             switch (typ)
             {
                 case ToRemove.RemoveMax:
+                {
+                    if (Children.Length == 0)
                     {
-                        if (Children.Length == 0)
-                        {
-                            return Items.Pop();
-                        }
-                        i = Items.Length;
+                        var me = MutableFor(Cow);
+
+                        return (Items.Pop(), me);
                     }
+
+                    i = Items.Length;
+                }
                     break;
                 case ToRemove.RemoveMin:
+                {
+                    if (Children.Length == 0)
                     {
-                        if (Children.Length == 0)
-                        {
-                            return Items.RemoveAt(0);
-                        }
-                        i = 0;
+                        var me = MutableFor(Cow);
+
+                        return (Items.RemoveAt(0), me);
                     }
+
+                    i = 0;
+                }
                     break;
                 case ToRemove.RemoveItem:
+                {
+                    (i, found) = Items.Find(item);
+                    if (Children.Length == 0)
                     {
-                        (i, found) = Items.Find(item);
-                        if (Children.Length == 0)
+                        if (found)
                         {
-                            return found ? Items.RemoveAt(i) : null;
+                            var me = MutableFor(Cow);
+
+                            return (me.Items.RemoveAt(i), me);
                         }
+
+                        return (null, this);
                     }
+                }
                     break;
                 default:
                     Environment.FailFast("invalid type");
                     break;
             }
+
             // If we get to here, we have children.
             if (Children[i].Items.Length <= minItems)
             {
-                return GrowChildAndRemove(i, item, minItems, typ);
+                var me = MutableFor(Cow);
+
+                return me.GrowChildAndRemove(i, item, minItems, typ);
             }
-            Node<T> child = MutableChild(i);
+
             // Either we had enough items to begin with, or we've done some
             // merging/stealing, because we've got enough now and we're ready to return
             if (found)
             {
                 // The item exists at index 'i', and the child we've selected can give us a
                 // predecessor, since if we've gotten here it's got > minItems items in it.
-                T n = Items[i];
+                var n = Items[i];
                 // We use our special-case 'remove' call with typ=maxItem to pull the
                 // predecessor of item i (the rightmost leaf of our immediate left child)
                 // and set it into where we pulled the item from.
-                Items[i] = child.Remove(null, minItems, ToRemove.RemoveMax);
-                return n;
+                var (it, child) = Children[i].Remove(null, minItems, ToRemove.RemoveMax);
+                if (child != Children[i])
+                {
+                    var me = MutableFor(Cow);
+                    me.Items[i] = it;
+                    me.SwapChild(i, child);
+
+                    return (n, this);
+                }
+
+                Items[i] = it;
+
+                return (n, this);
             }
+
             // Final recursive call.  Once we're here, we know that the item isn't in this
             // node and that the child is big enough to remove from.
-            return child.Remove(item, minItems, typ);
+            var (ou, ch) = Children[i].Remove(item, minItems, typ);
+            SwapChild(i, ch);
+
+            return (ou, this);
         }
 
         // Grows child 'i' to make sure it's possible to remove an
@@ -541,33 +624,38 @@ namespace CodeExMachina
         // We then simply redo our remove call, and the second time (regardless of
         // whether we're in case 1 or 2), we'll have enough items and can guarantee
         // that we hit case A.        
-        public T GrowChildAndRemove(int i, T item, int minItems, ToRemove typ)
+        public (T, Node<T>) GrowChildAndRemove(int i, T item, int minItems, ToRemove typ)
         {
             if (i > 0 && Children[i - 1].Items.Length > minItems)
             {
                 // Steal from left child
-                Node<T> child = MutableChild(i);
-                Node<T> stealFrom = MutableChild(i - 1);
-                T stolenItem = stealFrom.Items.Pop();
+                var child = Children[i].MutableFor(Cow);
+                var stealFrom = Children[i-1].MutableFor(Cow);
+                var stolenItem = stealFrom.Items.Pop();
                 child.Items.InsertAt(0, Items[i - 1]);
                 Items[i - 1] = stolenItem;
                 if (stealFrom.Children.Length > 0)
                 {
                     child.Children.InsertAt(0, stealFrom.Children.Pop());
                 }
+                SwapChild(i, child);
+                SwapChild(i - 1, stealFrom);
             }
             else if (i < Items.Length && Children[i + 1].Items.Length > minItems)
             {
                 // steal from right child
-                Node<T> child = MutableChild(i);
-                Node<T> stealFrom = MutableChild(i + 1);
-                T stolenItem = stealFrom.Items.RemoveAt(0);
+                var child = Children[i].MutableFor(Cow);
+                var stealFrom = Children[i + 1].MutableFor(Cow);
+                var stolenItem = stealFrom.Items.RemoveAt(0);
                 child.Items.Append(Items[i]);
                 Items[i] = stolenItem;
                 if (stealFrom.Children.Length > 0)
                 {
                     child.Children.Append(stealFrom.Children.RemoveAt(0));
                 }
+
+                SwapChild(i, child);
+                SwapChild(i + 1, stealFrom);
             }
             else
             {
@@ -575,15 +663,18 @@ namespace CodeExMachina
                 {
                     i--;
                 }
-                Node<T> child = MutableChild(i);
+
+                var child = Children[i].MutableFor(Cow);
                 // merge with right child
-                T mergeItem = Items.RemoveAt(i);
-                Node<T> mergeChild = Children.RemoveAt(i + 1);
+                var mergeItem = Items.RemoveAt(i);
+                var mergeChild = Children.RemoveAt(i + 1);
                 child.Items.Append(mergeItem);
                 child.Items.Append(mergeChild.Items);
                 child.Children.Append(mergeChild.Children);
+                SwapChild(i, child);
                 _ = Cow.FreeNode(mergeChild);
             }
+
             return Remove(item, minItems, typ);
         }
 
@@ -601,100 +692,111 @@ namespace CodeExMachina
             switch (dir)
             {
                 case Direction.Ascend:
+                {
+                    if (start != null)
                     {
-                        if (start != null)
-                        {
-                            (index, _) = Items.Find(start);
-                        }
-                        for (int i = index; i < Items.Length; i++)
-                        {
-                            if (Children.Length > 0)
-                            {
-                                (hit, ok) = Children[i].Iterate(dir, start, stop, includeStart, hit, iter);
-                                if (!ok)
-                                {
-                                    return (hit, false);
-                                }
-                            }
-                            if (!includeStart && !hit && start != null && !Less(start, Items[i]))
-                            {
-                                hit = true;
-                                continue;
-                            }
-                            hit = true;
-                            if (stop != null && !Less(Items[i], stop))
-                            {
-                                return (hit, false);
-                            }
-                            if (!iter(Items[i]))
-                            {
-                                return (hit, false);
-                            }
-                        }
+                        (index, _) = Items.Find(start);
+                    }
+
+                    for (int i = index; i < Items.Length; i++)
+                    {
                         if (Children.Length > 0)
                         {
-                            (hit, ok) = Children[Children.Length - 1].Iterate(dir, start, stop, includeStart, hit, iter);
+                            (hit, ok) = Children[i].Iterate(dir, start, stop, includeStart, hit, iter);
                             if (!ok)
                             {
                                 return (hit, false);
                             }
                         }
+
+                        if (!includeStart && !hit && start != null && !Less(start, Items[i]))
+                        {
+                            hit = true;
+                            continue;
+                        }
+
+                        hit = true;
+                        if (stop != null && !Less(Items[i], stop))
+                        {
+                            return (hit, false);
+                        }
+
+                        if (!iter(Items[i]))
+                        {
+                            return (hit, false);
+                        }
                     }
+
+                    if (Children.Length > 0)
+                    {
+                        (hit, ok) = Children[Children.Length - 1].Iterate(dir, start, stop, includeStart, hit, iter);
+                        if (!ok)
+                        {
+                            return (hit, false);
+                        }
+                    }
+                }
                     break;
                 case Direction.Descend:
+                {
+                    if (start != null)
                     {
-                        if (start != null)
+                        (index, found) = Items.Find(start);
+                        if (!found)
                         {
-                            (index, found) = Items.Find(start);
-                            if (!found)
+                            index -= 1;
+                        }
+                    }
+                    else
+                    {
+                        index = Items.Length - 1;
+                    }
+
+                    for (int i = index; i >= 0; i--)
+                    {
+                        if (start != null && !Less(Items[i], start))
+                        {
+                            if (!includeStart || hit || Less(start, Items[i]))
                             {
-                                index -= 1;
+                                continue;
                             }
                         }
-                        else
-                        {
-                            index = Items.Length - 1;
-                        }
-                        for (int i = index; i >= 0; i--)
-                        {
-                            if (start != null && !Less(Items[i], start))
-                            {
-                                if (!includeStart || hit || Less(start, Items[i]))
-                                {
-                                    continue;
-                                }
-                            }
-                            if (Children.Length > 0)
-                            {
-                                (hit, ok) = Children[i + 1].Iterate(dir, start, stop, includeStart, hit, iter);
-                                if (!ok)
-                                {
-                                    return (hit, false);
-                                }
-                            }
-                            if (stop != null && !Less(stop, Items[i]))
-                            {
-                                return (hit, false);
-                            }
-                            hit = true;
-                            if (!iter(Items[i]))
-                            {
-                                return (hit, false);
-                            }
-                        }
+
                         if (Children.Length > 0)
                         {
-                            (hit, ok) = Children[0].Iterate(dir, start, stop, includeStart, hit, iter);
+                            (hit, ok) = Children[i + 1].Iterate(dir, start, stop, includeStart, hit, iter);
                             if (!ok)
                             {
                                 return (hit, false);
                             }
                         }
+
+                        if (stop != null && !Less(stop, Items[i]))
+                        {
+                            return (hit, false);
+                        }
+
+                        hit = true;
+                        if (!iter(Items[i]))
+                        {
+                            return (hit, false);
+                        }
                     }
+
+                    if (Children.Length > 0)
+                    {
+                        (hit, ok) = Children[0].Iterate(dir, start, stop, includeStart, hit, iter);
+                        if (!ok)
+                        {
+                            return (hit, false);
+                        }
+                    }
+                }
                     break;
                 default:
                     break;
             }
+
             return (hit, true);
         }
 
@@ -710,6 +812,7 @@ namespace CodeExMachina
                     return false;
                 }
             }
+
             return c.FreeNode(this) != FreeType.ftFreeListFull;
         }
 
@@ -753,7 +856,8 @@ namespace CodeExMachina
         private CopyOnWriteContext<T> Cow { get; set; }
 
         private BTree()
-        { }
+        {
+        }
 
         /// <summary>
         /// Creates a new B-Tree with the given degree.
@@ -765,7 +869,8 @@ namespace CodeExMachina
         /// <param name="comparer"></param>
         public BTree(int degree, Comparer<T> comparer)
             : this(degree, new FreeList<T>(comparer))
-        { }
+        {
+        }
 
         /// <summary>
         /// Creates a new B-Tree that uses the given node free list.
@@ -778,8 +883,9 @@ namespace CodeExMachina
             {
                 Environment.FailFast("bad degree");
             }
+
             Degree = degree;
-            Cow = new CopyOnWriteContext<T> { FreeList = f };
+            Cow = new CopyOnWriteContext<T> {FreeList = f};
         }
 
         /// <summary>
@@ -802,8 +908,8 @@ namespace CodeExMachina
             //   the original, shared nodes (old b.cow)
             //   the new b.cow nodes
             //   the new out.cow nodes
-            CopyOnWriteContext<T> cow1 = new CopyOnWriteContext<T> { FreeList = Cow.FreeList };
-            CopyOnWriteContext<T> cow2 = new CopyOnWriteContext<T> { FreeList = Cow.FreeList };
+            CopyOnWriteContext<T> cow1 = new CopyOnWriteContext<T> {FreeList = Cow.FreeList};
+            CopyOnWriteContext<T> cow2 = new CopyOnWriteContext<T> {FreeList = Cow.FreeList};
             BTree<T> tree = new BTree<T>
             {
                 Degree = Degree,
@@ -847,6 +953,7 @@ namespace CodeExMachina
             {
                 Environment.FailFast("null item being added to BTree");
             }
+
             if (Root == null)
             {
                 Root = Cow.NewNode();
@@ -854,25 +961,41 @@ namespace CodeExMachina
                 Length++;
                 return null;
             }
-            else
+
+            var rot = Root;
+
+            if (rot.Items.Length >= MaxItems())
             {
-                Root = Root.MutableFor(Cow);
-                if (Root.Items.Length >= MaxItems())
+                var oldRoot = rot.MutableFor(Cow);
+                var (item2, second) = oldRoot.Split(MaxItems() / 2);
+                var root = Cow.NewNode();
+                root.Items.Append(item2);
+                root.Children.Append(oldRoot);
+                root.Children.Append(second);
+                if (oldRoot != rot)
                 {
-                    (T item2, Node<T> second) = Root.Split(MaxItems() / 2);
-                    Node<T> oldRoot = Root;
-                    Root = Cow.NewNode();
-                    Root.Items.Append(item2);
-                    Root.Children.Append(oldRoot);
-                    Root.Children.Append(second);
+                    Cow.FreeNode(rot);
                 }
+
+                rot = root;
             }
-            T result = Root.Insert(item, MaxItems());
-            if (result == null)
+
+            var (ou, r) = rot.Insert(item, MaxItems());
+            if (rot != r)
+            {
+                Cow.FreeNode(Root);
+
+                rot = r;
+            }
+
+            if (ou == null)
             {
                 Length++;
             }
-            return result;
+
+            Root = rot;
+
+            return ou;
         }
 
         /// <summary>
@@ -905,22 +1028,33 @@ namespace CodeExMachina
 
         private T DeleteItem(T item, ToRemove typ)
         {
-            if (Root == null || Root.Items.Length == 0)
+            var rt = Root;
+            if (rt == null || rt.Items.Length == 0)
             {
                 return null;
             }
-            Root = Root.MutableFor(Cow);
-            T result = Root.Remove(item, MinItems(), typ);
-            if (Root.Items.Length == 0 && Root.Children.Length > 0)
+
+            var (result, root) = rt.Remove(item, MinItems(), typ);
+            if (root.Items.Length == 0 && root.Children.Length > 0)
             {
-                Node<T> oldRoot = Root;
-                Root = Root.Children[0];
-                _ = Cow.FreeNode(oldRoot);
+                rt = root.Children[0];
+                Root = rt;
+                Cow.FreeNode(root);
             }
+            else
+            {
+                if (rt != root)
+                {
+                    Cow.FreeNode(rt);
+                    Root = root;
+                }
+            }
+
             if (result != null)
             {
                 Length--;
             }
+
             return result;
         }
 
@@ -937,6 +1071,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Ascend, greaterOrEqual, lessThan, true, false, iterator);
         }
 
@@ -952,6 +1087,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Ascend, null, pivot, false, false, iterator);
         }
 
@@ -967,6 +1103,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Ascend, pivot, null, true, false, iterator);
         }
 
@@ -981,6 +1118,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Ascend, null, null, false, false, iterator);
         }
 
@@ -997,6 +1135,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Descend, lessOrEqual, greaterThan, true, false, iterator);
         }
 
@@ -1012,6 +1151,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Descend, pivot, null, true, false, iterator);
         }
 
@@ -1027,6 +1167,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Descend, null, pivot, false, false, iterator);
         }
 
@@ -1041,6 +1182,7 @@ namespace CodeExMachina
             {
                 return;
             }
+
             _ = Root.Iterate(Direction.Descend, null, null, false, false, iterator);
         }
 
@@ -1108,6 +1250,7 @@ namespace CodeExMachina
             {
                 _ = Root.Reset(Cow);
             }
+
             Root = null;
             Length = 0;
         }
@@ -1168,12 +1311,12 @@ namespace CodeExMachina
                 return FreeType.ftNotOwned;
             }
         }
-    }    
+    }
 
     /// <summary>
     /// Int implements the Item interface for integers.
     /// </summary>
-    public class Int : IComparable, IComparable<int>      
+    public class Int : IComparable, IComparable<int>
     {
         private readonly int _v;
 
@@ -1181,7 +1324,7 @@ namespace CodeExMachina
         {
             _v = v;
         }
-        
+
         public override string ToString()
         {
             return _v.ToString();
@@ -1194,7 +1337,7 @@ namespace CodeExMachina
 
         public int CompareTo(object obj)
         {
-            Int v = (Int)obj;
+            Int v = (Int) obj;
             return _v.CompareTo(v._v);
         }
 
@@ -1212,7 +1355,7 @@ namespace CodeExMachina
         {
             if (other is null) return false;
             return _v == other._v;
-        }        
+        }
 
         public static bool operator <(Int a, Int b)
         {
@@ -1232,7 +1375,7 @@ namespace CodeExMachina
         public static bool operator ==(Int a, Int b)
         {
             return object.Equals(a, b);
-        }        
+        }
     }
 
     /// <summary>
